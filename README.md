@@ -26,6 +26,18 @@
 - [TomTom Orbis Maps API](https://developer.tomtom.com/)：ベースマップ・ルーティング・検索
 - MapLibre GL JS、Turf.js（ルートからの距離計算・500m バッファ生成）
 
+### 旧API（v1）へのフォールバック
+
+API キーのプランで Orbis Maps が使えない場合（401/403 など）は、起動時に自動で TomTom の旧APIに切り替えます。
+
+| 機能 | 新SDK（Orbis） | フォールバック（旧API） |
+| --- | --- | --- |
+| 地図 | `TomTomMap`（Orbis スタイル） | Map Display API v1 ラスタタイル `map/1/tile/basic/main/{z}/{x}/{y}.png` |
+| 徒歩ルート | `calculateRoute`（`travelMode: 'pedestrian'`） | Routing API v1 `routing/1/calculateRoute/...?travelMode=pedestrian` |
+| POI 検索 | `discoverPlaces`（ルートの 500m バッファ内） | Search API v2 `search/2/poiSearch/{query}.json`（ルート沿いに円を並べて検索） |
+
+どちらの場合も、検索結果はルートからの実距離で 500m 以内に絞り込んで表示します。
+
 ## ファイル構成
 
 ```

@@ -11,6 +11,8 @@
   SDK は peer dependencies（maplibre-gl, @turf/turf, lodash-es, zod, culori）を
   bare specifier で import するため、import map で CDN の URL に解決する。
 -->
+<!-- 新SDK は MapLibre の CSS を自動で読み込むが、旧API（v1）フォールバック時は自前で読み込む -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@6.13.0/dist/maplibre-gl.css">
 <script type="importmap">
 {
   "imports": {
@@ -175,7 +177,7 @@
   import { TomTomConfig } from '@tomtom-org/maps-sdk/core';
   import { calculateRoute, discoverPlaces } from '@tomtom-org/maps-sdk/services';
   import { TomTomMap, RoutingModule, PlacesModule } from '@tomtom-org/maps-sdk/map';
-  import { Popup } from 'maplibre-gl';
+  import { Map as MapLibreMap, Marker, Popup, NavigationControl } from 'maplibre-gl';
   import * as turf from '@turf/turf';
 
   const API_KEY = 'cb1deab0-ab57-439e-9699-5b320ac07f53';
@@ -183,12 +185,27 @@
   // [経度, 緯度]（GeoJSON の順序）
   const ORIGIN = [139.3768, 35.5688];       // 淵野辺駅
   const DESTINATION = [139.3848, 35.5826];  // 青山学院大学 相模原キャンパス
+  const CENTER = [(ORIGIN[0] + DESTINATION[0]) / 2, (ORIGIN[1] + DESTINATION[1]) / 2];
   const SEARCH_RADIUS_M = 500;
 
+  // poiCategories: 新SDK（Orbis）用のカテゴリコード
+  // v1Queries:     旧 Search API v2 poiSearch 用の検索語とカテゴリID（categorySet）
   const CATEGORIES = {
-    food:        { label: '飲食店',   color: '#e8590c', poiCategories: ['RESTAURANT', 'FAST_FOOD', 'CAFE_PUB'] },
-    convenience: { label: 'コンビニ', color: '#0c8599', poiCategories: ['CONVENIENCE_STORE'] },
-    park:        { label: '公園',     color: '#2f9e44', poiCategories: ['PARK_AND_RECREATION_AREA'] },
+    food: {
+      label: '飲食店', color: '#e8590c',
+      poiCategories: ['RESTAURANT', 'FAST_FOOD', 'CAFE_PUB'],
+      v1Queries: [{ query: 'restaurant', categorySet: '7315' }, { query: 'cafe', categorySet: '9376' }],
+    },
+    convenience: {
+      label: 'コンビニ', color: '#0c8599',
+      poiCategories: ['CONVENIENCE_STORE'],
+      v1Queries: [{ query: 'convenience store', categorySet: '9361009' }],
+    },
+    park: {
+      label: '公園', color: '#2f9e44',
+      poiCategories: ['PARK_AND_RECREATION_AREA'],
+      v1Queries: [{ query: 'park', categorySet: '9362' }],
+    },
   };
 
   const statusEl = document.getElementById('status');
@@ -197,44 +214,110 @@
     statusEl.classList.toggle('error', isError);
   };
 
+  const isAuthError = (error) => [401, 403].includes(error?.status ?? error?.response?.status);
+
+  // ---------- 地図の初期化（Orbis → 旧API v1 ラスタタイルへフォールバック） ----------
+
   // 'ngt'（Neutral Ground Truth）= 各地の現地語表記。日本国内では日本語の地名・店名になる。
   TomTomConfig.instance.put({ apiKey: API_KEY, language: 'ngt' });
 
-  const map = new TomTomMap({
-    mapLibre: {
-      container: 'map',
-      center: [(ORIGIN[0] + DESTINATION[0]) / 2, (ORIGIN[1] + DESTINATION[1]) / 2],
-      zoom: 15,
+  const createV1Map = () => new MapLibreMap({
+    container: 'map',
+    center: CENTER,
+    zoom: 15,
+    style: {
+      version: 8,
+      sources: {
+        'tomtom-v1': {
+          type: 'raster',
+          tiles: [`https://api.tomtom.com/map/1/tile/basic/main/{z}/{x}/{y}.png?key=${API_KEY}`],
+          tileSize: 256,
+          maxzoom: 22,
+          attribution: '© <a href="https://www.tomtom.com/" target="_blank" rel="noopener">TomTom</a>',
+        },
+      },
+      layers: [{ id: 'tomtom-v1', type: 'raster', source: 'tomtom-v1' }],
     },
   });
-  const mlMap = map.mapLibreMap;
 
-  mlMap.on('error', (event) => {
-    const status = event.error?.status;
-    if (status === 401 || status === 403) {
-      setStatus(`地図を読み込めません（${status}）。APIキーが無効か、Orbis Maps の利用権限がありません。`, true);
+  // Orbis Maps が使えるかを地図の作成前に確認する。
+  // （TomTomMap を作ってから v1 に作り直すと、MapLibre のワーカーが不安定になり描画が欠けることがあるため）
+  const orbisAvailable = async () => {
+    const url = new URL('https://api.tomtom.com/maps/orbis/assets/styles/0.6.0-0/style.json');
+    url.searchParams.set('apiVersion', '1');
+    url.searchParams.set('key', API_KEY);
+    url.searchParams.set('map', 'basic_street-light');
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) console.warn(`Orbis Maps が利用できません（${res.status}）。旧API（v1）を使います`);
+      return res.ok;
+    } catch (error) {
+      console.warn('Orbis Maps に接続できません。旧API（v1）を使います', error);
+      return false;
     }
+  };
+
+  const createV1MapReady = () => new Promise((resolve) => {
+    const ml = createV1Map();
+    ml.addControl(new NavigationControl({ showCompass: false }));
+    ml.once('load', () => resolve({ mode: 'v1', tomtomMap: null, ml }));
   });
+
+  // Orbis が使えれば新SDK（TomTomMap）、使えなければ旧API v1 のラスタタイル。
+  // 事前確認を通っても TomTomMap の読み込みに失敗した場合は v1 で作り直す。
+  const initMap = async () => (await orbisAvailable()) ? createOrbisMap() : createV1MapReady();
+
+  const createOrbisMap = () => new Promise((resolve) => {
+    let settled = false;
+    const useV1 = (reason) => {
+      if (settled) return;
+      settled = true;
+      console.warn('Orbis Maps が利用できないため旧API（v1）に切り替えます', reason);
+      try { tomtomMap?.mapLibreMap.remove(); } catch { /* 既に破棄済み */ }
+      resolve(createV1MapReady());
+    };
+
+    let tomtomMap;
+    try {
+      tomtomMap = new TomTomMap({ mapLibre: { container: 'map', center: CENTER, zoom: 15 } });
+    } catch (error) {
+      useV1(error);
+      return;
+    }
+    const ml = tomtomMap.mapLibreMap;
+    // 認証エラー、またはスタイル自体が取得できない場合は v1 へ
+    ml.on('error', (event) => {
+      const styleFailed = /\/style/.test(event.error?.url ?? '');
+      if (isAuthError(event.error) || styleFailed) useV1(event.error);
+    });
+    // 一定時間内に読み込みが終わらない場合も v1 へ
+    const timer = setTimeout(() => useV1(new Error('Orbis Maps の読み込みがタイムアウトしました')), 10000);
+    ml.once('load', () => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      resolve({ mode: 'orbis', tomtomMap, ml });
+    });
+  });
+
+  const { mode, tomtomMap, ml: mlMap } = await initMap();
 
   // ---------- 徒歩ルート ----------
 
-  // SDK の calculateRoute（Orbis Routing API）で徒歩ルートを取得する。
+  // 新SDK の calculateRoute（Orbis Routing API）で徒歩ルートを取得する。
   // 型定義上の TravelMode は現在 'car' のみだが、リクエスト検証は文字列を受け付けるため 'pedestrian' を渡す。
   const fetchRouteWithSdk = async () => {
-    const routes = await calculateRoute({
-      locations: [ORIGIN, DESTINATION],
-      travelMode: 'pedestrian',
-    });
+    const routes = await calculateRoute({ locations: [ORIGIN, DESTINATION], travelMode: 'pedestrian' });
     const route = routes.features[0];
     return { routes, line: route.geometry, summary: route.properties.summary };
   };
 
-  // 予備：TomTom Routing API（REST）の travelMode=pedestrian を直接呼ぶ
-  const fetchRouteWithRest = async () => {
+  // 旧 Routing API v1（travelMode=pedestrian）
+  const fetchRouteWithV1 = async () => {
     const locs = [ORIGIN, DESTINATION].map(([lng, lat]) => `${lat},${lng}`).join(':');
     const url = `https://api.tomtom.com/routing/1/calculateRoute/${locs}/json?travelMode=pedestrian&key=${API_KEY}`;
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`Routing API ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`Routing API v1 エラー（${res.status}）`), { status: res.status });
     const json = await res.json();
     const r = json.routes[0];
     const coordinates = r.legs.flatMap((leg) => leg.points.map((p) => [p.longitude, p.latitude]));
@@ -255,17 +338,41 @@
     });
   };
 
-  const showRoute = async (routingModule) => {
+  const addEndpointMarkers = () => {
+    const ends = [
+      { lngLat: ORIGIN, color: '#16a34a', label: '出発：淵野辺駅' },
+      { lngLat: DESTINATION, color: '#dc2626', label: '到着：青山学院大学 相模原キャンパス' },
+    ];
+    for (const { lngLat, color, label } of ends) {
+      new Marker({ color })
+        .setLngLat(lngLat)
+        .setPopup(new Popup({ offset: 30, closeButton: false }).setText(label))
+        .addTo(mlMap);
+    }
+  };
+
+  const showRoute = async () => {
     let result;
-    try {
-      result = await fetchRouteWithSdk();
-      await routingModule.showRoutes(result.routes);
-    } catch (sdkError) {
-      console.warn('SDK での徒歩ルート取得に失敗したため Routing API を直接呼び出します', sdkError);
-      result = await fetchRouteWithRest();
+    let routingModule;
+    if (mode === 'orbis') {
+      try {
+        routingModule = await RoutingModule.create(tomtomMap);
+        result = await fetchRouteWithSdk();
+        await routingModule.showRoutes(result.routes);
+      } catch (sdkError) {
+        console.warn('新SDK での徒歩ルート取得に失敗したため Routing API v1 を使います', sdkError);
+        result = null;
+      }
+    }
+    if (!result) {
+      result = await fetchRouteWithV1();
       drawRouteWithMapLibre(result.line);
     }
-    await routingModule.showWaypoints([ORIGIN, DESTINATION]);
+    if (routingModule) {
+      await routingModule.showWaypoints([ORIGIN, DESTINATION]);
+    } else {
+      addEndpointMarkers();
+    }
 
     const { lengthInMeters, travelTimeInSeconds } = result.summary;
     document.getElementById('route-distance').textContent =
@@ -279,28 +386,93 @@
     return result.line;
   };
 
-  // ---------- ルート周辺のスポット ----------
+  // ---------- ルート周辺のスポット検索 ----------
 
-  const searchCategory = async (routeLine, buffer, key) => {
+  // ルートからの距離を付与し、500m 以内だけを近い順に残す
+  const withinRoute = (features, routeLine) => features
+    .map((f) => ({
+      ...f,
+      properties: {
+        ...f.properties,
+        distanceFromRoute: turf.pointToLineDistance(f.geometry.coordinates, routeLine, { units: 'meters' }),
+      },
+    }))
+    .filter((f) => f.properties.distanceFromRoute <= SEARCH_RADIUS_M)
+    .sort((a, b) => a.properties.distanceFromRoute - b.properties.distanceFromRoute);
+
+  // 新SDK：ルートの 500m バッファ内をジオメトリ検索
+  const searchWithSdk = async (routeLine, buffer, key) => {
     const places = await discoverPlaces({
       geometries: [buffer.geometry],
       filters: { poiCategories: CATEGORIES[key].poiCategories },
       limit: 100,
     });
-    // 検索範囲のポリゴンは API 送信時に簡略化されるため、ルートからの距離で厳密に絞り込む
-    const features = places.features
-      .map((f) => {
-        const distance = turf.pointToLineDistance(f.geometry.coordinates, routeLine, { units: 'meters' });
-        return { ...f, properties: { ...f.properties, distanceFromRoute: distance } };
-      })
-      .filter((f) => f.properties.distanceFromRoute <= SEARCH_RADIUS_M)
-      .sort((a, b) => a.properties.distanceFromRoute - b.properties.distanceFromRoute);
-    return { ...places, features };
+    return { type: 'FeatureCollection', features: withinRoute(places.features, routeLine) };
   };
+
+  // 旧 Search API：poiSearch は中心点＋半径の円で検索するため、ルート沿いに円を並べて検索する
+  const SAMPLE_STEP_M = 300;
+  const SAMPLE_RADIUS_M = 550; // 円の間隔 300m でもルートから 500m の帯をすき間なく覆う半径
+
+  const sampleRoutePoints = (routeLine) => {
+    const length = turf.length(turf.feature(routeLine), { units: 'meters' });
+    const points = [];
+    for (let d = 0; d < length; d += SAMPLE_STEP_M) {
+      points.push(turf.along(routeLine, d, { units: 'meters' }).geometry.coordinates);
+    }
+    points.push(routeLine.coordinates.at(-1));
+    return points;
+  };
+
+  // 同時接続数を絞って順に実行（無料プランの QPS 制限対策）
+  const runLimited = async (tasks, concurrency = 2) => {
+    const results = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < tasks.length) {
+        const i = next++;
+        results[i] = await tasks[i]();
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, worker));
+    return results;
+  };
+
+  const fetchV1Poi = async ({ query, categorySet }, [lng, lat], attempt = 0) => {
+    const params = new URLSearchParams({
+      key: API_KEY, lat, lon: lng, radius: SAMPLE_RADIUS_M, limit: 100, categorySet, language: 'NGT',
+    });
+    const url = `https://api.tomtom.com/search/2/poiSearch/${encodeURIComponent(query)}.json?${params}`;
+    const res = await fetch(url);
+    if (res.status === 429 && attempt < 3) {
+      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+      return fetchV1Poi({ query, categorySet }, [lng, lat], attempt + 1);
+    }
+    if (!res.ok) throw Object.assign(new Error(`Search API v2 エラー（${res.status}）`), { status: res.status });
+    return (await res.json()).results ?? [];
+  };
+
+  const searchWithV1 = async (routeLine, key) => {
+    const points = sampleRoutePoints(routeLine);
+    const tasks = CATEGORIES[key].v1Queries.flatMap((q) => points.map((p) => () => fetchV1Poi(q, p)));
+    const byId = new globalThis.Map();
+    for (const r of (await runLimited(tasks)).flat()) {
+      byId.set(r.id, {
+        type: 'Feature',
+        id: r.id,
+        geometry: { type: 'Point', coordinates: [r.position.lon, r.position.lat] },
+        properties: { poi: r.poi, address: r.address },
+      });
+    }
+    return { type: 'FeatureCollection', features: withinRoute([...byId.values()], routeLine) };
+  };
+
+  // ---------- スポットの表示 ----------
 
   const placeName = (f) => f.properties.poi?.name ?? f.properties.address?.freeformAddress ?? '名称不明';
 
-  const state = { filter: 'all', modules: {}, results: {} };
+  // 各カテゴリの表示レイヤー（新SDK の PlacesModule か、MapLibre の円レイヤー）
+  const state = { filter: 'all', layers: {}, results: {} };
   let popup;
 
   const openPopup = (f, key) => {
@@ -319,10 +491,44 @@
       addr.textContent = f.properties.address.freeformAddress;
       el.append(addr);
     }
-    popup = new Popup({ offset: 28, closeButton: true, maxWidth: '260px' })
+    popup = new Popup({ offset: 16, closeButton: true, maxWidth: '260px' })
       .setLngLat(f.geometry.coordinates)
       .setDOMContent(el)
       .addTo(mlMap);
+  };
+
+  const showWithPlacesModule = async (key, places) => {
+    const module = await PlacesModule.create(tomtomMap, { markerType: 'pin', color: CATEGORIES[key].color });
+    module.events.on('click', (feature) => {
+      openPopup(places.features.find((f) => f.id === feature.id) ?? feature, key);
+    });
+    await module.show(places);
+    return { setVisible: (visible) => module.setVisible(visible) };
+  };
+
+  const showWithMapLibre = (key, places) => {
+    const id = `poi-${key}`;
+    // MapLibre はネストしたプロパティを文字列化するため、元データへの添字だけを持たせる
+    const data = {
+      type: 'FeatureCollection',
+      features: places.features.map((f, i) => ({ type: 'Feature', geometry: f.geometry, properties: { idx: i } })),
+    };
+    mlMap.addSource(id, { type: 'geojson', data });
+    mlMap.addLayer({
+      id, type: 'circle', source: id,
+      paint: {
+        'circle-radius': 7,
+        'circle-color': CATEGORIES[key].color,
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 2,
+      },
+    });
+    mlMap.on('click', id, (event) => {
+      openPopup(places.features[event.features[0].properties.idx], key);
+    });
+    mlMap.on('mouseenter', id, () => { mlMap.getCanvas().style.cursor = 'pointer'; });
+    mlMap.on('mouseleave', id, () => { mlMap.getCanvas().style.cursor = ''; });
+    return { setVisible: (visible) => mlMap.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none') };
   };
 
   const renderList = () => {
@@ -367,8 +573,8 @@
     document.querySelectorAll('.filters button').forEach((btn) => {
       btn.setAttribute('aria-pressed', String(btn.dataset.filter === filter));
     });
-    for (const [key, module] of Object.entries(state.modules)) {
-      module.setVisible(filter === 'all' || filter === key);
+    for (const [key, layer] of Object.entries(state.layers)) {
+      layer.setVisible(filter === 'all' || filter === key);
     }
     popup?.remove();
     renderList();
@@ -398,17 +604,20 @@
 
     const keys = Object.keys(CATEGORIES);
     const settled = await Promise.allSettled(keys.map(async (key) => {
-      const [module, places] = await Promise.all([
-        PlacesModule.create(map, { markerType: 'pin', color: CATEGORIES[key].color }),
-        searchCategory(routeLine, buffer, key),
-      ]);
-      state.modules[key] = module;
+      let places;
+      let useSdk = mode === 'orbis';
+      if (useSdk) {
+        try {
+          places = await searchWithSdk(routeLine, buffer, key);
+        } catch (sdkError) {
+          console.warn(`新SDK での検索（${CATEGORIES[key].label}）に失敗したため Search API v2 を使います`, sdkError);
+          useSdk = false;
+        }
+      }
+      if (!places) places = await searchWithV1(routeLine, key);
+
       state.results[key] = places;
-      module.events.on('click', (feature) => {
-        const original = places.features.find((f) => f.id === feature.id) ?? feature;
-        openPopup(original, key);
-      });
-      await module.show(places);
+      state.layers[key] = useSdk ? await showWithPlacesModule(key, places) : showWithMapLibre(key, places);
       document.querySelector(`[data-count="${key}"]`).textContent = places.features.length;
     }));
 
@@ -418,7 +627,8 @@
 
     const total = keys.reduce((n, k) => n + (state.results[k]?.features.length ?? 0), 0);
     if (failed.length === keys.length) {
-      setStatus('スポットの検索に失敗しました（APIキーの設定を確認してください）', true);
+      const auth = failed.some((s) => isAuthError(s.reason));
+      setStatus(auth ? 'スポットを検索できません（APIキーが無効か、Search API の権限がありません）' : 'スポットの検索に失敗しました', true);
     } else if (failed.length > 0) {
       setStatus(`スポット ${total} 件を表示中（一部カテゴリの検索に失敗しました）`, true);
     } else {
@@ -428,15 +638,24 @@
 
   // ---------- 起動 ----------
 
+  if (mode === 'v1') {
+    mlMap.on('error', (event) => {
+      if (isAuthError(event.error)) {
+        setStatus('地図タイルを読み込めません（APIキーが無効か、Map Display API の権限がありません）', true);
+      }
+    });
+  }
+
   try {
-    const routingModule = await RoutingModule.create(map);
     setStatus('徒歩ルートを計算中…');
-    const routeLine = await showRoute(routingModule);
+    const routeLine = await showRoute();
     setStatus('周辺スポットを検索中…');
     await showPlaces(routeLine);
   } catch (error) {
     console.error(error);
-    setStatus(`読み込みに失敗しました：${error.message ?? error}`, true);
+    setStatus(isAuthError(error)
+      ? 'ルートを取得できません（APIキーが無効か、Routing API の権限がありません）'
+      : `読み込みに失敗しました：${error.message ?? error}`, true);
   }
 </script>
 </body>
