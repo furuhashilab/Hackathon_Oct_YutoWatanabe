@@ -150,7 +150,7 @@
       </ul>
       <div class="summary">
         <div>距離<strong id="route-distance">–</strong></div>
-        <div>所要時間（徒歩）<strong id="route-time">–</strong></div>
+        <div title="80m/分で換算">所要時間（徒歩）<strong id="route-time">–</strong></div>
       </div>
     </div>
 
@@ -180,11 +180,11 @@
   import { Map as MapLibreMap, Marker, Popup, NavigationControl } from 'maplibre-gl';
   import * as turf from '@turf/turf';
 
-  const API_KEY = 'cb1deab0-ab57-439e-9699-5b320ac07f53';
+  const API_KEY = 'VjPA1EVuBxh30kngqhAJb0LCtdbPEoYv';
 
   // [経度, 緯度]（GeoJSON の順序）
-  const ORIGIN = [139.3768, 35.5688];       // 淵野辺駅
-  const DESTINATION = [139.3848, 35.5826];  // 青山学院大学 相模原キャンパス
+  const ORIGIN = [139.39482, 35.56873];       // 淵野辺駅
+  const DESTINATION = [139.40256, 35.56652];  // 青山学院大学 相模原キャンパス
   const CENTER = [(ORIGIN[0] + DESTINATION[0]) / 2, (ORIGIN[1] + DESTINATION[1]) / 2];
   const SEARCH_RADIUS_M = 500;
 
@@ -304,15 +304,20 @@
 
   // ---------- 徒歩ルート ----------
 
-  // 新SDK の calculateRoute（Orbis Routing API）で徒歩ルートを取得する。
-  // 型定義上の TravelMode は現在 'car' のみだが、リクエスト検証は文字列を受け付けるため 'pedestrian' を渡す。
+  // 新SDK の calculateRoute（Orbis Routing API）は現在 travelMode が 'car' のみで、'pedestrian' は 400 になる。
+  // 一方、旧 Routing API v1 の pedestrian はこの地域の道路データが粗く、建物を横切る直線的なルートになる。
+  // そこで Orbis が使える場合は Orbis の最短距離ルート（routeType: 'short'）を徒歩経路として使い、
+  // 所要時間は不動産表示の基準である 80m/分 で徒歩時間に換算する。
+  const WALK_METERS_PER_MINUTE = 80;
+
   const fetchRouteWithSdk = async () => {
-    const routes = await calculateRoute({ locations: [ORIGIN, DESTINATION], travelMode: 'pedestrian' });
+    const routes = await calculateRoute({ locations: [ORIGIN, DESTINATION], costModel: { routeType: 'short' } });
     const route = routes.features[0];
-    return { routes, line: route.geometry, summary: route.properties.summary };
+    const { lengthInMeters } = route.properties.summary;
+    return { routes, line: route.geometry, lengthInMeters, walkSeconds: (lengthInMeters / WALK_METERS_PER_MINUTE) * 60 };
   };
 
-  // 旧 Routing API v1（travelMode=pedestrian）
+  // 予備：旧 Routing API v1（travelMode=pedestrian）
   const fetchRouteWithV1 = async () => {
     const locs = [ORIGIN, DESTINATION].map(([lng, lat]) => `${lat},${lng}`).join(':');
     const url = `https://api.tomtom.com/routing/1/calculateRoute/${locs}/json?travelMode=pedestrian&key=${API_KEY}`;
@@ -321,7 +326,12 @@
     const json = await res.json();
     const r = json.routes[0];
     const coordinates = r.legs.flatMap((leg) => leg.points.map((p) => [p.longitude, p.latitude]));
-    return { routes: null, line: { type: 'LineString', coordinates }, summary: r.summary };
+    return {
+      routes: null,
+      line: { type: 'LineString', coordinates },
+      lengthInMeters: r.summary.lengthInMeters,
+      walkSeconds: r.summary.travelTimeInSeconds,
+    };
   };
 
   const drawRouteWithMapLibre = (line) => {
@@ -359,28 +369,28 @@
         routingModule = await RoutingModule.create(tomtomMap);
         result = await fetchRouteWithSdk();
         await routingModule.showRoutes(result.routes);
+        await routingModule.showWaypoints([ORIGIN, DESTINATION]);
       } catch (sdkError) {
-        console.warn('新SDK での徒歩ルート取得に失敗したため Routing API v1 を使います', sdkError);
+        console.warn('新SDK でルートを取得できないため Routing API v1 を使います', sdkError);
         result = null;
       }
     }
     if (!result) {
       result = await fetchRouteWithV1();
       drawRouteWithMapLibre(result.line);
-    }
-    if (routingModule) {
-      await routingModule.showWaypoints([ORIGIN, DESTINATION]);
-    } else {
-      addEndpointMarkers();
+      if (routingModule) await routingModule.showWaypoints([ORIGIN, DESTINATION]);
+      else addEndpointMarkers();
     }
 
-    const { lengthInMeters, travelTimeInSeconds } = result.summary;
+    const { lengthInMeters, walkSeconds } = result;
     document.getElementById('route-distance').textContent =
       lengthInMeters >= 1000 ? `${(lengthInMeters / 1000).toFixed(2)} km` : `${Math.round(lengthInMeters)} m`;
-    document.getElementById('route-time').textContent = `約 ${Math.max(1, Math.round(travelTimeInSeconds / 60))} 分`;
+    document.getElementById('route-time').textContent = `約 ${Math.max(1, Math.round(walkSeconds / 60))} 分`;
 
-    // ルート全体が収まるように表示範囲を調整
-    const [minX, minY, maxX, maxY] = turf.bbox(result.line);
+    // ルートと出発地・目的地がすべて収まるように表示範囲を調整
+    const [minX, minY, maxX, maxY] = turf.bbox(turf.featureCollection([
+      turf.feature(result.line), turf.point(ORIGIN), turf.point(DESTINATION),
+    ]));
     mlMap.fitBounds([[minX, minY], [maxX, maxY]], { padding: 70, maxZoom: 17, duration: 800 });
 
     return result.line;

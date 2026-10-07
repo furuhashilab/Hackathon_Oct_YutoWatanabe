@@ -9,7 +9,7 @@
 
 ## 主な機能
 
-- **徒歩ルート表示**：淵野辺駅（35.5688, 139.3768）→ 青山学院大学 相模原キャンパス（35.5826, 139.3848）の徒歩ルートを TomTom Routing API で計算して表示
+- **徒歩ルート表示**：淵野辺駅（35.56873, 139.39482）→ 青山学院大学 相模原キャンパス（35.56652, 139.40256）の徒歩ルートを TomTom Routing API で計算して表示
 - **出発地・目的地マーカー**：淵野辺駅と青学相模原キャンパスにマーカーを表示
 - **周辺スポット検索**：ルートから 500m 以内の飲食店・コンビニ・公園を TomTom POI Search API で検索して表示
 - **カテゴリ絞り込み**：「すべて／飲食店／コンビニ／公園」のボタンで表示を切り替え
@@ -21,7 +21,8 @@
 
 - [TomTom Maps SDK for JavaScript](https://docs.tomtom.com/maps-sdk-js)（`@tomtom-org/maps-sdk`）
   - `TomTomMap`：地図表示（MapLibre GL JS ベース）
-  - `calculateRoute` + `RoutingModule`：徒歩ルートの計算と表示（Routing API）
+  - `calculateRoute` + `RoutingModule`：ルートの計算と表示、出発地・目的地のマーカー（Routing API）
+  - 新SDK の `calculateRoute` は現在 `travelMode` が `car` のみのため、最短距離ルート（`routeType: 'short'`）を徒歩経路として使い、所要時間は 80m/分 で徒歩時間に換算しています
   - `discoverPlaces` + `PlacesModule`：POI 検索と表示（Search API）
 - [TomTom Orbis Maps API](https://developer.tomtom.com/)：ベースマップ・ルーティング・検索
 - MapLibre GL JS、Turf.js（ルートからの距離計算・500m バッファ生成）
@@ -33,7 +34,7 @@ API キーのプランで Orbis Maps が使えない場合（401/403 など）�
 | 機能 | 新SDK（Orbis） | フォールバック（旧API） |
 | --- | --- | --- |
 | 地図 | `TomTomMap`（Orbis スタイル） | Map Display API v1 ラスタタイル `map/1/tile/basic/main/{z}/{x}/{y}.png` |
-| 徒歩ルート | `calculateRoute`（`travelMode: 'pedestrian'`） | Routing API v1 `routing/1/calculateRoute/...?travelMode=pedestrian` |
+| 徒歩ルート | `calculateRoute`（`routeType: 'short'`、徒歩 80m/分 換算） | Routing API v1 `routing/1/calculateRoute/...?travelMode=pedestrian` |
 | POI 検索 | `discoverPlaces`（ルートの 500m バッファ内） | Search API v2 `search/2/poiSearch/{query}.json`（ルート沿いに円を並べて検索） |
 
 どちらの場合も、検索結果はルートからの実距離で 500m 以内に絞り込んで表示します。
@@ -61,8 +62,8 @@ python -m http.server 8000
 ## API キーについて
 
 `index.html` 内の `API_KEY` に TomTom の API キーを設定しています。
-ブラウザで動作するため、キーはページを開いた人から見えます。
-[TomTom Developer Portal](https://developer.tomtom.com/) でキーの利用ドメインを制限することを推奨します。
+ブラウザで動作するため、キーはページを開いた人から見えます。そのためキーは公開ページのドメイン（`furuhashilab.github.io`）からのリクエストのみ許可するよう制限しています。
+ローカル環境（`localhost`）で動かす場合は、[TomTom Developer Portal](https://developer.tomtom.com/) で許可ドメインを追加するか、別のキーを使ってください。
 
 ## ライセンス
 
