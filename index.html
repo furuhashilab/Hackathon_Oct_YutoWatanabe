@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>淵野辺 ルート＆スポット探索マップ</title>
+<meta name="description" content="淵野辺駅から青山学院大学相模原キャンパスまでの徒歩ルートと、周辺500m以内の飲食店・コンビニ・公園を表示するマップ">
+
+<!--
+  TomTom Maps SDK for JavaScript (@tomtom-org/maps-sdk) を CDN から ES Modules として読み込む。
+  SDK は peer dependencies（maplibre-gl, @turf/turf, lodash-es, zod, culori）を
+  bare specifier で import するため、import map で CDN の URL に解決する。
+-->
+<script type="importmap">
+{
+  "imports": {
+    "@tomtom-org/maps-sdk/core": "https://cdn.jsdelivr.net/npm/@tomtom-org/maps-sdk@1.0.0-rc.1/core/dist/core.es.js",
+    "@tomtom-org/maps-sdk/services": "https://cdn.jsdelivr.net/npm/@tomtom-org/maps-sdk@1.0.0-rc.1/services/dist/services.es.js",
+    "@tomtom-org/maps-sdk/map": "https://cdn.jsdelivr.net/npm/@tomtom-org/maps-sdk@1.0.0-rc.1/map/dist/map.es.js",
+    "maplibre-gl": "https://cdn.jsdelivr.net/npm/maplibre-gl@6.13.0/dist/maplibre-gl.mjs",
+    "@turf/turf": "https://cdn.jsdelivr.net/npm/@turf/turf@7.4.0/+esm",
+    "lodash-es": "https://cdn.jsdelivr.net/npm/lodash-es@4.18.1/+esm",
+    "zod": "https://cdn.jsdelivr.net/npm/zod@4.6.5/+esm",
+    "culori/fn": "https://cdn.jsdelivr.net/npm/culori@4.0.2/fn/+esm"
+  }
+}
+</script>
+
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --text: #1f2933;
+    --muted: #6b7684;
+    --line: #e3e7ec;
+    --accent: #2563eb;
+    --food: #e8590c;
+    --conv: #0c8599;
+    --park: #2f9e44;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Noto Sans JP", Meiryo, system-ui, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 12px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 1.15rem; }
+  header p { margin: 2px 0 0; font-size: .85rem; color: var(--muted); }
+
+  .layout { flex: 1; display: flex; min-height: 0; }
+  #map { flex: 1; min-height: 320px; }
+
+  aside {
+    width: 340px;
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .section h2 { margin: 0 0 8px; font-size: .8rem; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+
+  .route-ends { list-style: none; margin: 0; padding: 0; font-size: .9rem; }
+  .route-ends li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+  .badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 50%;
+    color: #fff; font-size: .72rem; font-weight: 700; flex-shrink: 0;
+  }
+  .badge.start { background: #16a34a; }
+  .badge.goal { background: #dc2626; }
+  .summary { display: flex; gap: 16px; margin-top: 10px; }
+  .summary div { font-size: .78rem; color: var(--muted); }
+  .summary strong { display: block; font-size: 1.15rem; color: var(--text); }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; }
+  .filters button {
+    font: inherit; font-size: .85rem;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1.5px solid var(--line);
+    background: #fff;
+    color: var(--text);
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .filters button .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--c, var(--accent)); }
+  .filters button .count { font-size: .75rem; color: var(--muted); }
+  .filters button[aria-pressed="true"] { background: var(--c, var(--accent)); border-color: var(--c, var(--accent)); color: #fff; }
+  .filters button[aria-pressed="true"] .dot { background: #fff; }
+  .filters button[aria-pressed="true"] .count { color: rgba(255,255,255,.85); }
+  .filters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .list-wrap { flex: 1; overflow-y: auto; min-height: 0; }
+  #poi-list { list-style: none; margin: 0; padding: 4px 0; }
+  #poi-list li {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 9px 16px; cursor: pointer;
+    border-bottom: 1px solid #f0f2f5;
+  }
+  #poi-list li:hover { background: #f3f6fb; }
+  #poi-list .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; flex-shrink: 0; }
+  #poi-list .name { font-size: .9rem; }
+  #poi-list .meta { font-size: .75rem; color: var(--muted); }
+  .empty { padding: 16px; font-size: .85rem; color: var(--muted); }
+
+  #status {
+    font-size: .8rem; color: var(--muted);
+    padding: 8px 16px; border-top: 1px solid var(--line);
+  }
+  #status.error { color: #c92a2a; background: #fff5f5; }
+
+  .maplibregl-popup-content { font-family: inherit; font-size: .85rem; padding: 8px 12px; }
+  .popup-title { font-weight: 700; }
+  .popup-meta { color: var(--muted); font-size: .75rem; }
+
+  @media (max-width: 760px) {
+    .layout { flex-direction: column-reverse; }
+    aside { width: 100%; max-height: 45vh; border-right: none; border-top: 1px solid var(--line); }
+    #map { min-height: 55vh; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>淵野辺 ルート＆スポット探索マップ</h1>
+  <p>淵野辺駅 → 青山学院大学 相模原キャンパス の徒歩ルートと、ルート周辺500m以内のスポット</p>
+</header>
+
+<div class="layout">
+  <aside>
+    <div class="section">
+      <h2>徒歩ルート</h2>
+      <ul class="route-ends">
+        <li><span class="badge start">発</span>淵野辺駅</li>
+        <li><span class="badge goal">着</span>青山学院大学 相模原キャンパス</li>
+      </ul>
+      <div class="summary">
+        <div>距離<strong id="route-distance">–</strong></div>
+        <div>所要時間（徒歩）<strong id="route-time">–</strong></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>カテゴリで絞り込み</h2>
+      <div class="filters" role="group" aria-label="カテゴリ">
+        <button type="button" data-filter="all" aria-pressed="true">すべて</button>
+        <button type="button" data-filter="food" aria-pressed="false" style="--c: var(--food)"><span class="dot"></span>飲食店<span class="count" data-count="food"></span></button>
+        <button type="button" data-filter="convenience" aria-pressed="false" style="--c: var(--conv)"><span class="dot"></span>コンビニ<span class="count" data-count="convenience"></span></button>
+        <button type="button" data-filter="park" aria-pressed="false" style="--c: var(--park)"><span class="dot"></span>公園<span class="count" data-count="park"></span></button>
+      </div>
+    </div>
+
+    <div class="list-wrap">
+      <ul id="poi-list"></ul>
+    </div>
+    <div id="status">読み込み中…</div>
+  </aside>
+
+  <div id="map"></div>
+</div>
+
+<script type="module">
+  import { TomTomConfig } from '@tomtom-org/maps-sdk/core';
+  import { calculateRoute, discoverPlaces } from '@tomtom-org/maps-sdk/services';
+  import { TomTomMap, RoutingModule, PlacesModule } from '@tomtom-org/maps-sdk/map';
+  import { Popup } from 'maplibre-gl';
+  import * as turf from '@turf/turf';
+
+  const API_KEY = 'cb1deab0-ab57-439e-9699-5b320ac07f53';
+
+  // [経度, 緯度]（GeoJSON の順序）
+  const ORIGIN = [139.3768, 35.5688];       // 淵野辺駅
+  const DESTINATION = [139.3848, 35.5826];  // 青山学院大学 相模原キャンパス
+  const SEARCH_RADIUS_M = 500;
+
+  const CATEGORIES = {
+    food:        { label: '飲食店',   color: '#e8590c', poiCategories: ['RESTAURANT', 'FAST_FOOD', 'CAFE_PUB'] },
+    convenience: { label: 'コンビニ', color: '#0c8599', poiCategories: ['CONVENIENCE_STORE'] },
+    park:        { label: '公園',     color: '#2f9e44', poiCategories: ['PARK_AND_RECREATION_AREA'] },
+  };
+
+  const statusEl = document.getElementById('status');
+  const setStatus = (text, isError = false) => {
+    statusEl.textContent = text;
+    statusEl.classList.toggle('error', isError);
+  };
+
+  // 'ngt'（Neutral Ground Truth）= 各地の現地語表記。日本国内では日本語の地名・店名になる。
+  TomTomConfig.instance.put({ apiKey: API_KEY, language: 'ngt' });
+
+  const map = new TomTomMap({
+    mapLibre: {
+      container: 'map',
+      center: [(ORIGIN[0] + DESTINATION[0]) / 2, (ORIGIN[1] + DESTINATION[1]) / 2],
+      zoom: 15,
+    },
+  });
+  const mlMap = map.mapLibreMap;
+
+  mlMap.on('error', (event) => {
+    const status = event.error?.status;
+    if (status === 401 || status === 403) {
+      setStatus(`地図を読み込めません（${status}）。APIキーが無効か、Orbis Maps の利用権限がありません。`, true);
+    }
+  });
+
+  // ---------- 徒歩ルート ----------
+
+  // SDK の calculateRoute（Orbis Routing API）で徒歩ルートを取得する。
+  // 型定義上の TravelMode は現在 'car' のみだが、リクエスト検証は文字列を受け付けるため 'pedestrian' を渡す。
+  const fetchRouteWithSdk = async () => {
+    const routes = await calculateRoute({
+      locations: [ORIGIN, DESTINATION],
+      travelMode: 'pedestrian',
+    });
+    const route = routes.features[0];
+    return { routes, line: route.geometry, summary: route.properties.summary };
+  };
+
+  // 予備：TomTom Routing API（REST）の travelMode=pedestrian を直接呼ぶ
+  const fetchRouteWithRest = async () => {
+    const locs = [ORIGIN, DESTINATION].map(([lng, lat]) => `${lat},${lng}`).join(':');
+    const url = `https://api.tomtom.com/routing/1/calculateRoute/${locs}/json?travelMode=pedestrian&key=${API_KEY}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Routing API ${res.status}`);
+    const json = await res.json();
+    const r = json.routes[0];
+    const coordinates = r.legs.flatMap((leg) => leg.points.map((p) => [p.longitude, p.latitude]));
+    return { routes: null, line: { type: 'LineString', coordinates }, summary: r.summary };
+  };
+
+  const drawRouteWithMapLibre = (line) => {
+    mlMap.addSource('walk-route', { type: 'geojson', data: { type: 'Feature', geometry: line, properties: {} } });
+    mlMap.addLayer({
+      id: 'walk-route-casing', type: 'line', source: 'walk-route',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#ffffff', 'line-width': 9 },
+    });
+    mlMap.addLayer({
+      id: 'walk-route', type: 'line', source: 'walk-route',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#2563eb', 'line-width': 5 },
+    });
+  };
+
+  const showRoute = async (routingModule) => {
+    let result;
+    try {
+      result = await fetchRouteWithSdk();
+      await routingModule.showRoutes(result.routes);
+    } catch (sdkError) {
+      console.warn('SDK での徒歩ルート取得に失敗したため Routing API を直接呼び出します', sdkError);
+      result = await fetchRouteWithRest();
+      drawRouteWithMapLibre(result.line);
+    }
+    await routingModule.showWaypoints([ORIGIN, DESTINATION]);
+
+    const { lengthInMeters, travelTimeInSeconds } = result.summary;
+    document.getElementById('route-distance').textContent =
+      lengthInMeters >= 1000 ? `${(lengthInMeters / 1000).toFixed(2)} km` : `${Math.round(lengthInMeters)} m`;
+    document.getElementById('route-time').textContent = `約 ${Math.max(1, Math.round(travelTimeInSeconds / 60))} 分`;
+
+    // ルート全体が収まるように表示範囲を調整
+    const [minX, minY, maxX, maxY] = turf.bbox(result.line);
+    mlMap.fitBounds([[minX, minY], [maxX, maxY]], { padding: 70, maxZoom: 17, duration: 800 });
+
+    return result.line;
+  };
+
+  // ---------- ルート周辺のスポット ----------
+
+  const searchCategory = async (routeLine, buffer, key) => {
+    const places = await discoverPlaces({
+      geometries: [buffer.geometry],
+      filters: { poiCategories: CATEGORIES[key].poiCategories },
+      limit: 100,
+    });
+    // 検索範囲のポリゴンは API 送信時に簡略化されるため、ルートからの距離で厳密に絞り込む
+    const features = places.features
+      .map((f) => {
+        const distance = turf.pointToLineDistance(f.geometry.coordinates, routeLine, { units: 'meters' });
+        return { ...f, properties: { ...f.properties, distanceFromRoute: distance } };
+      })
+      .filter((f) => f.properties.distanceFromRoute <= SEARCH_RADIUS_M)
+      .sort((a, b) => a.properties.distanceFromRoute - b.properties.distanceFromRoute);
+    return { ...places, features };
+  };
+
+  const placeName = (f) => f.properties.poi?.name ?? f.properties.address?.freeformAddress ?? '名称不明';
+
+  const state = { filter: 'all', modules: {}, results: {} };
+  let popup;
+
+  const openPopup = (f, key) => {
+    popup?.remove();
+    const el = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'popup-title';
+    title.textContent = placeName(f);
+    const meta = document.createElement('div');
+    meta.className = 'popup-meta';
+    meta.textContent = `${CATEGORIES[key].label} ・ ルートから約${Math.round(f.properties.distanceFromRoute)}m`;
+    el.append(title, meta);
+    if (f.properties.address?.freeformAddress) {
+      const addr = document.createElement('div');
+      addr.className = 'popup-meta';
+      addr.textContent = f.properties.address.freeformAddress;
+      el.append(addr);
+    }
+    popup = new Popup({ offset: 28, closeButton: true, maxWidth: '260px' })
+      .setLngLat(f.geometry.coordinates)
+      .setDOMContent(el)
+      .addTo(mlMap);
+  };
+
+  const renderList = () => {
+    const list = document.getElementById('poi-list');
+    list.replaceChildren();
+    const keys = state.filter === 'all' ? Object.keys(CATEGORIES) : [state.filter];
+    const items = keys
+      .flatMap((key) => (state.results[key]?.features ?? []).map((f) => ({ f, key })))
+      .sort((a, b) => a.f.properties.distanceFromRoute - b.f.properties.distanceFromRoute);
+
+    if (items.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = '該当するスポットはありません';
+      list.append(li);
+      return;
+    }
+    for (const { f, key } of items) {
+      const li = document.createElement('li');
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.style.background = CATEGORIES[key].color;
+      const body = document.createElement('div');
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = placeName(f);
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = `${CATEGORIES[key].label} ・ ルートから約${Math.round(f.properties.distanceFromRoute)}m`;
+      body.append(name, meta);
+      li.append(dot, body);
+      li.addEventListener('click', () => {
+        mlMap.flyTo({ center: f.geometry.coordinates, zoom: Math.max(mlMap.getZoom(), 16.5) });
+        openPopup(f, key);
+      });
+      list.append(li);
+    }
+  };
+
+  const applyFilter = (filter) => {
+    state.filter = filter;
+    document.querySelectorAll('.filters button').forEach((btn) => {
+      btn.setAttribute('aria-pressed', String(btn.dataset.filter === filter));
+    });
+    for (const [key, module] of Object.entries(state.modules)) {
+      module.setVisible(filter === 'all' || filter === key);
+    }
+    popup?.remove();
+    renderList();
+  };
+
+  document.querySelectorAll('.filters button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      // 選択中のカテゴリをもう一度押すと「すべて」に戻す
+      const next = btn.dataset.filter === state.filter ? 'all' : btn.dataset.filter;
+      applyFilter(next);
+    });
+  });
+
+  const showPlaces = async (routeLine) => {
+    const buffer = turf.buffer(turf.feature(routeLine), SEARCH_RADIUS_M, { units: 'meters' });
+
+    // 検索範囲（ルートから500m）を薄く表示
+    mlMap.addSource('search-area', { type: 'geojson', data: buffer });
+    mlMap.addLayer({
+      id: 'search-area-fill', type: 'fill', source: 'search-area',
+      paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.06 },
+    });
+    mlMap.addLayer({
+      id: 'search-area-line', type: 'line', source: 'search-area',
+      paint: { 'line-color': '#2563eb', 'line-opacity': 0.35, 'line-width': 1.5, 'line-dasharray': [2, 2] },
+    });
+
+    const keys = Object.keys(CATEGORIES);
+    const settled = await Promise.allSettled(keys.map(async (key) => {
+      const [module, places] = await Promise.all([
+        PlacesModule.create(map, { markerType: 'pin', color: CATEGORIES[key].color }),
+        searchCategory(routeLine, buffer, key),
+      ]);
+      state.modules[key] = module;
+      state.results[key] = places;
+      module.events.on('click', (feature) => {
+        const original = places.features.find((f) => f.id === feature.id) ?? feature;
+        openPopup(original, key);
+      });
+      await module.show(places);
+      document.querySelector(`[data-count="${key}"]`).textContent = places.features.length;
+    }));
+
+    const failed = settled.filter((s) => s.status === 'rejected');
+    failed.forEach((s) => console.error(s.reason));
+    applyFilter(state.filter);
+
+    const total = keys.reduce((n, k) => n + (state.results[k]?.features.length ?? 0), 0);
+    if (failed.length === keys.length) {
+      setStatus('スポットの検索に失敗しました（APIキーの設定を確認してください）', true);
+    } else if (failed.length > 0) {
+      setStatus(`スポット ${total} 件を表示中（一部カテゴリの検索に失敗しました）`, true);
+    } else {
+      setStatus(`ルート周辺${SEARCH_RADIUS_M}m以内のスポット ${total} 件を表示中`);
+    }
+  };
+
+  // ---------- 起動 ----------
+
+  try {
+    const routingModule = await RoutingModule.create(map);
+    setStatus('徒歩ルートを計算中…');
+    const routeLine = await showRoute(routingModule);
+    setStatus('周辺スポットを検索中…');
+    await showPlaces(routeLine);
+  } catch (error) {
+    console.error(error);
+    setStatus(`読み込みに失敗しました：${error.message ?? error}`, true);
+  }
+</script>
+</body>
+</html>
