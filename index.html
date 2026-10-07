@@ -366,7 +366,8 @@
     let routingModule;
     if (mode === 'orbis') {
       try {
-        routingModule = await RoutingModule.create(tomtomMap);
+        // 地図上のルート概要（車の所要時間）は徒歩時間と食い違うため表示しない
+        routingModule = await RoutingModule.create(tomtomMap, { summaryBubbles: { visible: false } });
         result = await fetchRouteWithSdk();
         await routingModule.showRoutes(result.routes);
         await routingModule.showWaypoints([ORIGIN, DESTINATION]);
